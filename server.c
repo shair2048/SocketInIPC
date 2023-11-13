@@ -5,17 +5,79 @@
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <sys/un.h>
+#include <pthread.h>
 
 #define SOCKET_PATH "/tmp/demo_socket"
 
+int client_sockets[10]; // Mảng chứa socket của các client
+int num_clients = 0; // Số lượng client hiện tại
+
+void *handle_client(void *arg) {
+    int client_socket = *(int *)arg;
+    char message[1024];
+
+    while (1) {
+        // Nhận tin nhắn từ client
+        ssize_t received = recv(client_socket, message, sizeof(message) - 1, 0);
+        if (received <= 0) {
+            perror("Receive failed");
+            break;
+        }
+
+        message[received] = '\0';
+        printf("Received message from client: %s\n", message);
+
+        // Kiểm tra điều kiện dừng (ví dụ: nếu tin nhắn là "quit")
+        if (strcmp(message, "quit") == 0) {
+            printf("Client is quitting.\n");
+            break;  // Kết thúc kết nối của client
+        } else {
+            // Gửi tin nhắn đến tất cả client khác
+            for (int i = 0; i < num_clients; i++) {
+                if (client_sockets[i] != client_socket) {
+                    send(client_sockets[i], message, strlen(message), 0);
+                }
+            }
+        }
+    }
+
+    close(client_socket);
+
+    // Loại bỏ client_socket khỏi mảng
+    for (int i = 0; i < num_clients; i++) {
+        if (client_sockets[i] == client_socket) {
+            for (int j = i; j < num_clients - 1; j++) {
+                client_sockets[j] = client_sockets[j + 1];
+            }
+            num_clients--;
+            break;
+        }
+    }
+
+    return NULL;
+}
+
 int main() {
-    int server_socket, client_socket;
-    struct sockaddr_un server_address, client_address;
-    socklen_t client_address_len = sizeof(client_address);
+    int server_socket;
+    struct sockaddr_un server_address;
+    socklen_t client_address_len;
+    struct sockaddr_un client_address;
+
+    // Kiểm tra xem file socket đã tồn tại chưa, nếu có thì xóa
+    if (access(SOCKET_PATH, F_OK) != -1) {
+        unlink(SOCKET_PATH);
+    }
 
     // Tạo socket
     if ((server_socket = socket(AF_UNIX, SOCK_STREAM, 0)) == -1) {
         perror("Socket creation failed");
+        exit(EXIT_FAILURE);
+    }
+
+    // Sử dụng tùy chọn SO_REUSEADDR
+    int reuse = 1;
+    if (setsockopt(server_socket, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(int)) == -1) {
+        perror("setsockopt");
         exit(EXIT_FAILURE);
     }
 
@@ -38,48 +100,28 @@ int main() {
 
     printf("Server is listening...\n");
 
-    // Chấp nhận kết nối mới
-    if ((client_socket = accept(server_socket, (struct sockaddr*)&client_address, &client_address_len)) == -1) {
-        perror("Accept failed");
-        exit(EXIT_FAILURE);
-    }
-
-    printf("Client connected\n");
-
-    char message[1024];
-    int continue_sending = 1;  // Biến kiểm soát quá trình truyền thông
-
-    // Vòng lặp để nhận và gửi tin nhắn
-    while (continue_sending) {
-        // Nhận tin nhắn từ client
-        ssize_t received = recv(client_socket, message, sizeof(message) - 1, 0);
-        if (received <= 0) {
-            perror("Receive failed");
-            break;
+    while (1) {
+        client_address_len = sizeof(client_address);
+        // Chấp nhận kết nối mới
+        int client_socket = accept(server_socket, (struct sockaddr*)&client_address, &client_address_len);
+        if (client_socket == -1) {
+            perror("Accept failed");
+            continue;
         }
 
-        message[received] = '\0';
-        printf("Received message from client: %s\n", message);
+        // Thêm client_socket vào mảng
+        client_sockets[num_clients] = client_socket;
+        num_clients++;
 
-        // Kiểm tra điều kiện dừng (ví dụ: nếu tin nhắn là "quit")
-        if (strcmp(message, "quit") == 0) {
-            printf("Server is quitting.\n");
-            continue_sending = 0;  // Dừng quá trình truyền thông
-        } else {
-            // Gửi phản hồi về client
-            send(client_socket, message, strlen(message), 0);
+        printf("New client connected!!!\n");
 
-            // Nhập tin nhắn từ server
-            printf("Enter your response (or type 'quit' to exit): ");
-            fgets(message, sizeof(message), stdin);
-
-            // Gửi tin nhắn đến client
-            send(client_socket, message, strlen(message), 0);
-        }
+        // Tạo một luồng mới để xử lý client
+        pthread_t thread;
+        pthread_create(&thread, NULL, handle_client, &client_socket);
+        pthread_detach(thread);
     }
 
     // Đóng socket
-    close(client_socket);
     close(server_socket);
 
     // Xóa socket file
